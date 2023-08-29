@@ -43,5 +43,6 @@ The boundary conditions for pressure are Neumann boundaries, meaning that the gr
 This is because if the pressure gradient is positive, pressure could flow out of the boundary and be lost. 
 
 The method is outlined here: http://hplgit.github.io/INF5620/doc/pub/main_ns.pdf
+
 And this implementation has been used for guidance: https://www.youtube.com/watch?v=BQLvNLgMTQE
           
