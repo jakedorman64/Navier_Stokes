@@ -214,12 +214,12 @@ def v_update(v, p, element_length, dt=0.00001, density=1.):
 """
 
 @jit
-def impose_boundary(f, f_init):
-    """Sets the boundaries of f to the values specified in f_init."""
-    f = f.at[0, :].set(f_init[0, :])
-    f = f.at[:, 0].set(f_init[:, 0])
-    f = f.at[:, -1].set(f_init[:, -1])
-    f = f.at[-1, :].set(f_init[-1, :])
+def impose_boundary(f, f_bound):
+    """Sets the boundaries of f to the values specified in f_bound."""
+    f = f.at[0, :].set(f_bound[0, :])
+    f = f.at[:, 0].set(f_bound[:, 0])
+    f = f.at[:, -1].set(f_bound[:, -1])
+    f = f.at[-1, :].set(f_bound[-1, :])
     return f
 
 
@@ -235,20 +235,82 @@ def impose_boundary(f, f_init):
 """
 
 @partial(jit, static_argnames=['jacobi_iterations'])
-def progress_timestep(u_prev, v_prev, p_prev, u_init, v_init, element_length, dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50):
+def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50):
     """Progress the velocities and pressure forward by one timestep of size dt."""
     u_int = u_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity)
     v_int = v_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity)
     
-    u_int = impose_boundary(u_int, u_init)
-    v_int = impose_boundary(v_int, v_init)
+    u_int = impose_boundary(u_int, u_bound)
+    v_int = impose_boundary(v_int, v_bound)
 
     p_next = p_update(u_int, v_int, p_prev, element_length, dt=dt, density=density, jacobi_iterations=jacobi_iterations)
     
     u_next = u_update(u_int, p_next, element_length, dt=dt, density=density)
     v_next = v_update(v_int, p_next, element_length, dt=dt, density=density)
     
-    u_next = impose_boundary(u_next, u_init)
-    v_next = impose_boundary(v_next, v_init)
+    u_next = impose_boundary(u_next, u_bound)
+    v_next = impose_boundary(v_next, v_bound)
     
     return u_next, v_next, p_next
+
+
+"""Create a function to progress by one timestep, that also updates n body particle positions. 
+
+    The formulas used to update the position x and velocity v of the particle are:
+    
+        x_(n+1) = x_n + dt v_n,
+        v_(n+1) = v_n + D dt ρ (vr_n)^2
+        
+    Where D is a constant of drag, and vr = (vf - v) is the velocity of the particle relative to the fluid. 
+    The derivation of these equation are in the README. 
+    
+    The x and y coordinates of the object are continuous whilst the fluid is tracked at specific points. For this
+    reason, a function is needed to assign each n body particle to it's nearest point in the fluid. This is done in 
+    the closest_point function, by subtracting the coordinate value from each point on the axis and seeing which has
+    of these has the smallest absolute values. It is vectorised so that it will work on a vector quantity, not just 
+    a scalar. 
+"""
+
+@partial(jnp.vectorize, excluded=[1])
+def closest_point(x, num_points):
+    lin = jnp.linspace(0, 1, num_points)
+    x_array = x * jnp.ones_like(lin)
+
+    return jnp.argmin(jnp.abs(x_array - lin))
+
+@partial(jit, static_argnames=['jacobi_iterations'])
+def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_dt_prev, dy_dt_prev, 
+                                     u_bound, v_bound, element_length, drag_constant=1, 
+                                     dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50):
+    
+    # Use Euler's Method to find the next x and y values.
+    x_next = x_prev + dt * dx_dt_prev
+    y_next = y_prev + dt * dy_dt_prev
+    
+    # Find the number of points, to be used in the closest_point function.
+    num_points = jnp.shape(u_prev)[0]
+    
+    # Find the index x and y values for both particles. 
+    x_index = closest_point(x_prev, num_points)
+    y_index = closest_point(y_prev, num_points)
+    
+    # Find the velocities of the fluid at the location of each particle. 
+    fluid_velocities_x = u_prev[y_index, x_index]
+    fluid_velocities_y = v_prev[y_index, x_index]
+    
+    # Find the relative velocity of the fluid to the particle.
+    relative_velocities_x = fluid_velocities_x - dx_dt_prev
+    relative_velocities_y = fluid_velocities_y - dy_dt_prev
+    
+    # Find the new velocities of the particles.
+    dx_dt_next = dx_dt_prev + drag_constant * dt * viscosity * jnp.square(relative_velocities_x) * jnp.sign(relative_velocities_x)
+    dy_dt_next = dy_dt_prev + drag_constant * dt * viscosity * jnp.square(relative_velocities_y) * jnp.sign(relative_velocities_y)
+    
+    # Use the original progress_timestep function to find the next fluid velocities and the next pressure.
+    u_next, v_next, p_next = progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, 
+                                               dt=dt, density=density, viscosity=viscosity, 
+                                               jacobi_iterations=jacobi_iterations)
+    
+    return u_next, v_next, p_next, x_next, y_next, dx_dt_next, dy_dt_next
+
+
