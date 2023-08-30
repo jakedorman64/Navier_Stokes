@@ -6,5 +6,5 @@ setup(
 	description='A Navier Stokes Solver using JAX',
 	author='Jake Dorman',
 	packages=['navier_stokes'],
-	install_requires=['jax'],
+	install_requires=['jax']
 )
