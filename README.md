@@ -50,7 +50,7 @@ There is also a model of n body particles moving about in the fluid. The derivat
 Settin
   Given a position x and velocity v of the particle, Euler's method can be used to update the position of the particle:
 
-    x_(n_1) = x_n + dt v_n.
+    x_(n+1) = x_n + dt v_n.
 
   Updating the velocity requires the equation for drag force of a particle in a fluid. This is:
 
