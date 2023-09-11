@@ -178,7 +178,7 @@ def p_update(u, v, p_prev, element_length, dt=0.00001, density=1., jacobi_iterat
         p_next = p_next.at[:, -1].set(p_next[:, -2])
         p_next = p_next.at[0,  :].set(p_next[1,  :])
         p_next = p_next.at[:,  0].set(p_next[:,  1])
-        p_next = p_next.at[-1, :].set(0.0)
+        p_next = p_next.at[-1, :].set(p_next[-1, :])
 
         p_prev = p_next
 
@@ -261,14 +261,18 @@ def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, 
         x_(n+1) = x_n + dt v_n,
         v_(n+1) = v_n + D dt ρ (vr_n)^2
         
-    Where D is a constant of drag, and vr = (vf - v) is the velocity of the particle relative to the fluid. 
-    The derivation of these equation are in the README. 
+    Where D is a constant of drag (D = C A / 2m, where C is the coefficient of drag, A is the cross sectional area of 
+    the particle and m is the mass of the particle), and vr = (vf - v) is the velocity of the particle relative to the 
+    fluid. The derivation of these equation are in the README. 
     
     The x and y coordinates of the object are continuous whilst the fluid is tracked at specific points. For this
     reason, a function is needed to assign each n body particle to it's nearest point in the fluid. This is done in 
     the closest_point function, by subtracting the coordinate value from each point on the axis and seeing which has
     of these has the smallest absolute values. It is vectorised so that it will work on a vector quantity, not just 
     a scalar. 
+    
+    The function enforce_lower_boundary and enforce_upper_boundary must also be made to ensure that the particle stays 
+    in [0, 1] x [0, 1]. 
 """
 
 @partial(jnp.vectorize, excluded=[1])
@@ -278,6 +282,14 @@ def closest_point(x, num_points):
 
     return jnp.argmin(jnp.abs(x_array - lin))
 
+@jit
+def enforce_lower_boundary(x):
+    return jnp.where(x < 0., 0., x)
+
+@jit
+def enforce_upper_boundary(x):
+    return jnp.where(x > 1, 1, x)
+
 @partial(jit, static_argnames=['jacobi_iterations'])
 def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_dt_prev, dy_dt_prev, 
                                      u_bound, v_bound, element_length, drag_constant=1, 
@@ -286,6 +298,13 @@ def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_
     # Use Euler's Method to find the next x and y values.
     x_next = x_prev + dt * dx_dt_prev
     y_next = y_prev + dt * dy_dt_prev
+    
+    # Ensure the particle doesn't go outside the boundaries.
+    x_next = enforce_lower_boundary(x_next)
+    x_next = enforce_upper_boundary(x_next)
+    
+    y_next = enforce_lower_boundary(y_next)
+    y_next = enforce_upper_boundary(y_next)
     
     # Find the number of points, to be used in the closest_point function.
     num_points = jnp.shape(u_prev)[0]
@@ -314,3 +333,19 @@ def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_
     return u_next, v_next, p_next, x_next, y_next, dx_dt_next, dy_dt_next
 
 
+""" Testing the legitimacy of the solution. 
+
+    This section contains the following functions:
+        [+] div: returns the divergence at each point in the field f = (u, v):
+                ∇•f = du/dx + dv/dy
+        [+] kinetic_energy: Returns the kinetic energy of the function, assuming the mass in each square to be 1.
+ 
+"""
+
+def div(u, v, element_length):
+    div = jnp.zeros_like(u)
+    div[1:-1, 1:-1] = d_dx(u) + d_dy(v)
+    return div
+
+def kinetic_energy(u, v):
+    return jnp.sum(jnp.square(u)) + jnp.sum(jnp.square(v))
