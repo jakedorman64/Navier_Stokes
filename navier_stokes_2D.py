@@ -17,15 +17,13 @@
 
         F is the sum of all external forces (vector).
     
-    The density and viscosity of the fluid are assumed to be unchanging and known, and the external forces at 0, since this is 
-    assuming the forces will only act on the exterior of the box, thus the effect of forces can be incorperated into the boundary
-    conditions. 
+    The density and viscosity of the fluid are assumed to be unchanging and known.
     
     The method for updating velocity U_n and pressure p_n from time t to time t+dt is as followed (link to derivation in README):
     
         1: find the intemediate velocity U*:
 
-            U* = U_n - dt (U_n • ∇) U_n + dt µ ∆U_n 
+            U* = U_n - dt (U_n • ∇) U_n + dt (µ ∆U_n + F)
         
         2: Update the pressure by solving:
         
@@ -113,24 +111,30 @@ def laplacian(f, element_length):
 
     The Intermediate Velocity formula is:
     
-        U* = U_n - dt (U_n • ∇) U_n + dt v ∆U_n 
+        U* = U_n - dt (U_n • ∇) U_n + dt (v ∆U_n + F) 
         
     In component form, this is:
     
-        u* = u_n - dt(u ∂u/dx + v ∂u/dy) + dt µ u_n
-        v* = v_n - dt(u ∂v/dx + v ∂v/dy) + dt µ v_n
+        u* = u_n - dt(u ∂u/dx + v ∂u/dy) + dt (µ u_n + f_x)
+        v* = v_n - dt(u ∂v/dx + v ∂v/dy) + dt (µ v_n + f_y)
         
 """
 
 @jit
-def u_intermediate(u, v, element_length, dt=0.00001, viscosity=0.1):
+def u_intermediate(u, v, element_length, f_x=None, dt=0.00001, viscosity=0.1):
     """Calculates the intermediate velocities in the x direction."""
-    return u - dt * (jnp.multiply(u, d_dx(u, element_length)) + jnp.multiply(v, d_dy(u, element_length))) + dt * viscosity * laplacian(u, element_length)
+    if f_x == None: 
+        return u - dt * (jnp.multiply(u, d_dx(u, element_length)) + jnp.multiply(v, d_dy(u, element_length))) + dt * viscosity * laplacian(u, element_length)
+    else:
+        return u - dt * (jnp.multiply(u, d_dx(u, element_length)) + jnp.multiply(v, d_dy(u, element_length))) + dt * (viscosity * laplacian(u, element_length) + f_x)
 
 @jit
-def v_intermediate(u, v, element_length, dt=0.00001, viscosity=0.1):
+def v_intermediate(u, v, element_length, f_y=None, dt=0.00001, viscosity=0.1):
     """Calculates the intermediate velocities in the y direction."""
-    return v - dt * (jnp.multiply(u, d_dx(v, element_length)) + jnp.multiply(v, d_dy(v, element_length))) + dt * viscosity * laplacian(v, element_length)
+    if f_y == None:
+        return v - dt * (jnp.multiply(u, d_dx(v, element_length)) + jnp.multiply(v, d_dy(v, element_length))) + dt * viscosity * laplacian(v, element_length)
+    else:
+        return v - dt * (jnp.multiply(u, d_dx(v, element_length)) + jnp.multiply(v, d_dy(v, element_length))) + dt * (viscosity * laplacian(v, element_length) + f_y)
 
 
 """Step 2: Update Pressure. 
@@ -235,10 +239,10 @@ def impose_boundary(f, f_bound):
 """
 
 @partial(jit, static_argnames=['jacobi_iterations'])
-def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50):
+def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, f_x=None, f_y=None, dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50):
     """Progress the velocities and pressure forward by one timestep of size dt."""
-    u_int = u_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity)
-    v_int = v_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity)
+    u_int = u_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity, f_x=f_x)
+    v_int = v_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity, f_y=f_y)
     
     u_int = impose_boundary(u_int, u_bound)
     v_int = impose_boundary(v_int, v_bound)
@@ -271,8 +275,8 @@ def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, 
     of these has the smallest absolute values. It is vectorised so that it will work on a vector quantity, not just 
     a scalar. 
     
-    The function enforce_lower_boundary and enforce_upper_boundary must also be made to ensure that the particle stays 
-    in [0, 1] x [0, 1]. 
+    The functions enforce_lower_boundary and enforce_upper_boundary must also be made to ensure that the particle stays 
+    in [0, 1] x [0, 1], and to negate the velocities if the particle hits the wall.
 """
 
 @partial(jnp.vectorize, excluded=[1])
@@ -282,29 +286,36 @@ def closest_point(x, num_points):
 
     return jnp.argmin(jnp.abs(x_array - lin))
 
-@jit
-def enforce_lower_boundary(x):
-    return jnp.where(x < 0., 0., x)
+@partial(jit, static_argnames=['bounce'])
+def enforce_lower_boundary(x, dx_dt, bounce=False):
+    if bounce == False:
+        return jnp.where(x < 0., 0., x), dx_dt
+    else: 
+        return jnp.where(x < 0., 0., x), jnp.where(x < 0, -dx_dt, dx_dt)
+        
 
-@jit
-def enforce_upper_boundary(x):
-    return jnp.where(x > 1, 1, x)
+@partial(jit, static_argnames=['bounce'])
+def enforce_upper_boundary(x, dx_dt, bounce=False):
+    if bounce == False: 
+        return jnp.where(x > 1, 1, x), dx_dt
+    else:
+        return jnp.where(x > 1, 1, x), jnp.where(x > 1, -dx_dt, dx_dt)
 
-@partial(jit, static_argnames=['jacobi_iterations'])
+@partial(jit, static_argnames=['jacobi_iterations', 'bounce'])
 def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_dt_prev, dy_dt_prev, 
-                                     u_bound, v_bound, element_length, drag_constant=1, 
-                                     dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50):
+                                     u_bound, v_bound, element_length, f_x=None, f_y=None, drag_constant=1, 
+                                     dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50, bounce=False):
     
     # Use Euler's Method to find the next x and y values.
     x_next = x_prev + dt * dx_dt_prev
     y_next = y_prev + dt * dy_dt_prev
     
     # Ensure the particle doesn't go outside the boundaries.
-    x_next = enforce_lower_boundary(x_next)
-    x_next = enforce_upper_boundary(x_next)
+    x_next, dx_dt_prev = enforce_lower_boundary(x_next, dx_dt_prev, bounce=bounce)
+    x_next, dx_dt_prev = enforce_upper_boundary(x_next, dx_dt_prev, bounce=bounce)
     
-    y_next = enforce_lower_boundary(y_next)
-    y_next = enforce_upper_boundary(y_next)
+    y_next, dy_dt_prev = enforce_lower_boundary(y_next, dy_dt_prev, bounce=bounce)
+    y_next, dy_dt_prev = enforce_upper_boundary(y_next, dy_dt_prev, bounce=bounce)
     
     # Find the number of points, to be used in the closest_point function.
     num_points = jnp.shape(u_prev)[0]
@@ -327,7 +338,7 @@ def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_
     
     # Use the original progress_timestep function to find the next fluid velocities and the next pressure.
     u_next, v_next, p_next = progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, 
-                                               dt=dt, density=density, viscosity=viscosity, 
+                                               f_x=f_x, f_y=f_y, dt=dt, density=density, viscosity=viscosity, 
                                                jacobi_iterations=jacobi_iterations)
     
     return u_next, v_next, p_next, x_next, y_next, dx_dt_next, dy_dt_next
