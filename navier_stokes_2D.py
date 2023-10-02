@@ -1,6 +1,7 @@
 """2D NAVIER STOKES SOLVER
 
-    The functions below are for a 2D Navier Stokes solver, using a modified Euler Method. The Navier Stokes Equations are:
+    The functions below are for a 2D Navier Stokes solver, using a modified Euler Method. The Navier Stokes Equations
+    are:
     
         du/dt + (U • ∇)U = - 1/ρ + ∇p + µ ∆U + F
         ∇ • u = 0, 
@@ -19,9 +20,10 @@
     
     The density and viscosity of the fluid are assumed to be unchanging and known.
     
-    The method for updating velocity U_n and pressure p_n from time t to time t+dt is as followed (link to derivation in README):
+    The method for updating velocity U_n and pressure p_n from time t to time t+dt is as followed (link to derivation in
+    README):
     
-        1: find the intemediate velocity U*:
+        1: find the intermediate velocity U*:
 
             U* = U_n - dt (U_n • ∇) U_n + dt (µ ∆U_n + F)
         
@@ -33,11 +35,12 @@
         
             U_(n+1) = U* - (dt/ρ) ∇p_(n+1)
             
-    The boundary conditions for the velocity are Dirichlet Boundaries, meaning that they are known and unchanging. In this, 
-    these known values are the values specified in the initial values.
+    The boundary conditions for the velocity are Dirichlet Boundaries, meaning that they are known and unchanging.
+    In this, these known values are the values specified in the initial values.
     
-    The boundary conditions for pressure are Neumann boundaries, meaning that the gradient normal to the boundaries are known (0).
-    This is because if the pressure gradient is positive, pressure could flow out of the boundary and be lost. 
+    The boundary conditions for pressure are Neumann boundaries, meaning that the gradient normal to the boundaries are
+    known (0). This is because if the pressure gradient is positive, pressure could flow out of the boundary and be
+    lost.
             
 """
 
@@ -69,42 +72,50 @@ config.update("jax_disable_jit", False)
     
         ∆f(i, j) = [f(i+1, j) + f(i-1, j) + f(i, j+1) + f(i, j-1) - 4 f(i, j)] / ε**2
         
-    Note that in the code below, the indexing is the backwards compared to what is written above. This is because numpy (and by
-    extension jax numpy) indexes rows first. """
+    Note that in the code below, the indexing is the backwards compared to what is written above. This is because numpy 
+    (and by extension jax numpy) indexes rows first. """
+
 
 @jit
 def d_dx(f, element_length):
-    """Takes nxm array f and returns the 2 points finite difference derivative in the x direction, with border derivatives as 0."""
+    """Takes nxm array f and returns the 2 points finite difference derivative in the x direction, with
+    border derivatives as 0."""
     diff = jnp.zeros_like(f)
-    diff = diff.at[1:-1, 1:-1].set((f[1:-1, 2:] - f[1:-1, 0:-2] ) / ( 2 * element_length))
+    diff = diff.at[1:-1, 1:-1].set((f[1:-1, 2:] - f[1:-1, 0:-2]) / (2 * element_length))
     return diff
+
 
 @jit
 def d_dy(f, element_length):
-    """Takes nxm array f and returns the 2 points finite difference derivative in the y direction, with border derivatives as 0."""
+    """Takes nxm array f and returns the 2 points finite difference derivative in the y direction, with
+    border derivatives as 0."""
     diff = jnp.zeros_like(f)
-    diff = diff.at[1:-1, 1:-1].set((f[2:, 1:-1  ] - f[0:-2, 1:-1] ) / ( 2 * element_length))
+    diff = diff.at[1:-1, 1:-1].set((f[2:, 1:-1] - f[0:-2, 1:-1]) / (2 * element_length))
     return diff
+
 
 @jit
 def d2_dx2(f, element_length):
-    """Takes nxm array f and returns the 3 points finite difference second derivative in the x direction, with border derivatives as 0."""
+    """Takes nxm array f and returns the 3 points finite difference second derivative in the x direction,
+    with border derivatives as 0."""
     diff = jnp.zeros_like(f)
-    diff = diff.at[1:-1, 1:-1].set((f[1:-1, 2:  ] - 2 * f[1:-1, 1:-1] + f[1:-1, 0:-2] ) / (element_length**2))
+    diff = diff.at[1:-1, 1:-1].set((f[1:-1, 2:] - 2 * f[1:-1, 1:-1] + f[1:-1, 0:-2]) / (element_length**2))
     return diff
+
 
 @jit
 def d2_dy2(f, element_length):
-    """Takes nxm array f and returns the 3 points finite difference second derivative in the y direction, with border derivatives as 0."""
+    """Takes nxm array f and returns the 3 points finite difference second derivative in the y direction,
+    with border derivatives as 0."""
     diff = jnp.zeros_like(f)
-    diff = diff.at[1:-1, 1:-1].set((f[2:, 1:-1  ] - 2 * f[1:-1, 1:-1] + f[0:-2, 1:-1] ) / (element_length**2))
+    diff = diff.at[1:-1, 1:-1].set((f[2:, 1:-1] - 2 * f[1:-1, 1:-1] + f[0:-2, 1:-1]) / (element_length**2))
     return diff
+
 
 @jit
 def laplacian(f, element_length):
     """Takes nxm array f and returns the 5 points finite difference laplacian, with border derivatives as 0."""
     return d2_dx2(f, element_length) + d2_dy2(f, element_length)
-
 
 
 """Step 1: Intermediate Velocities.
@@ -120,21 +131,31 @@ def laplacian(f, element_length):
         
 """
 
+
 @jit
 def u_intermediate(u, v, element_length, f_x=None, dt=0.00001, viscosity=0.1):
     """Calculates the intermediate velocities in the x direction."""
-    if f_x == None: 
-        return u - dt * (jnp.multiply(u, d_dx(u, element_length)) + jnp.multiply(v, d_dy(u, element_length))) + dt * viscosity * laplacian(u, element_length)
+    if f_x is None:
+        return (u - dt * (jnp.multiply(u, d_dx(u, element_length)) +
+                jnp.multiply(v, d_dy(u, element_length))) +
+                dt * viscosity * laplacian(u, element_length))
     else:
-        return u - dt * (jnp.multiply(u, d_dx(u, element_length)) + jnp.multiply(v, d_dy(u, element_length))) + dt * (viscosity * laplacian(u, element_length) + f_x)
+        return (u - dt * (jnp.multiply(u, d_dx(u, element_length)) +
+                jnp.multiply(v, d_dy(u, element_length))) +
+                dt * (viscosity * laplacian(u, element_length) + f_x))
+
 
 @jit
 def v_intermediate(u, v, element_length, f_y=None, dt=0.00001, viscosity=0.1):
     """Calculates the intermediate velocities in the y direction."""
-    if f_y == None:
-        return v - dt * (jnp.multiply(u, d_dx(v, element_length)) + jnp.multiply(v, d_dy(v, element_length))) + dt * viscosity * laplacian(v, element_length)
+    if f_y is None:
+        return (v - dt * (jnp.multiply(u, d_dx(v, element_length)) +
+                jnp.multiply(v, d_dy(v, element_length))) +
+                dt * viscosity * laplacian(v, element_length))
     else:
-        return v - dt * (jnp.multiply(u, d_dx(v, element_length)) + jnp.multiply(v, d_dy(v, element_length))) + dt * (viscosity * laplacian(v, element_length) + f_y)
+        return (v - dt * (jnp.multiply(u, d_dx(v, element_length)) +
+                jnp.multiply(v, d_dy(v, element_length))) +
+                dt * (viscosity * laplacian(v, element_length) + f_y))
 
 
 """Step 2: Update Pressure. 
@@ -150,12 +171,13 @@ def v_intermediate(u, v, element_length, f_y=None, dt=0.00001, viscosity=0.1):
         
     This can be calculated iteratively to reach an estimate for the pressure at each timestep. 
     
-    To ensure that the Neumann boundaries are satisfied, after each Jacobi Iteration, the value of the boundaries are set
-    to be equal to the nearest interior point to them. 
+    To ensure that the Neumann boundaries are satisfied, after each Jacobi Iteration, the value of the boundaries are 
+    set to be equal to the nearest interior point to them. 
         
-    Note that this is partially jitted, so that the jacobi_iterations input will be inputted as an int and not a jax tracer
-    object, thus allowing it to be iterated over. 
+    Note that this is partially jitted, so that the jacobi_iterations input will be inputted as an int and 
+    not a jax tracer object, thus allowing it to be iterated over. 
 """
+
 
 @partial(jit, static_argnames=['jacobi_iterations'])
 def p_update(u, v, p_prev, element_length, dt=0.00001, density=1., jacobi_iterations=50):
@@ -166,27 +188,28 @@ def p_update(u, v, p_prev, element_length, dt=0.00001, density=1., jacobi_iterat
 
     for i in range(jacobi_iterations):
         p_next = jnp.zeros_like(p_prev)
-        p_next= p_next.at[1:-1, 1:-1].set(1/4 * (
+        p_next = p_next.at[1:-1, 1:-1].set(1/4 * (
             p_prev[1:-1, 0:-2]
             +
             p_prev[0:-2, 1:-1]
             +
-            p_prev[1:-1, 2:  ]
+            p_prev[1:-1, 2:]
             +
-            p_prev[2:  , 1:-1]
+            p_prev[2:, 1:-1]
             -
             element_length**2
             *
             rhs[1:-1, 1:-1]))
         
         p_next = p_next.at[:, -1].set(p_next[:, -2])
-        p_next = p_next.at[0,  :].set(p_next[1,  :])
-        p_next = p_next.at[:,  0].set(p_next[:,  1])
+        p_next = p_next.at[0, :].set(p_next[1, :])
+        p_next = p_next.at[:, 0].set(p_next[:, 1])
         p_next = p_next.at[-1, :].set(p_next[-1, :])
 
         p_prev = p_next
 
     return p_next
+
 
 """Step 3: Correct Velocities.
 
@@ -200,15 +223,17 @@ def p_update(u, v, p_prev, element_length, dt=0.00001, density=1., jacobi_iterat
         v_(n+1) = v* - (dt/ρ) ∂p_(n+1)/∂y
 """
 
+
 @jit
 def u_update(u, p, element_length, dt=0.00001, density=1.):
     """Updates the velocities in the x direction to the next timestep."""
-    return (u - (dt / density) * d_dx(p, element_length))
+    return u - (dt / density) * d_dx(p, element_length)
+
 
 @jit
 def v_update(v, p, element_length, dt=0.00001, density=1.):
     """Updates the velocities in the x direction to the next timestep."""
-    return (v - (dt / density) * d_dy(p, element_length))
+    return v - (dt / density) * d_dy(p, element_length)
 
 
 """Impose the Dirichlet boundary conditions for velocity. 
@@ -216,6 +241,7 @@ def v_update(v, p, element_length, dt=0.00001, density=1.):
     Imposing the Dirichlet boundary conditions just requires changing the outer perimeter of points to that 
     of the initial values. 
 """
+
 
 @jit
 def impose_boundary(f, f_bound):
@@ -238,8 +264,11 @@ def impose_boundary(f, f_bound):
         5: Impose the boundary conditions on the corrected velocities.
 """
 
+
 @partial(jit, static_argnames=['jacobi_iterations'])
-def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, f_x=None, f_y=None, dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50):
+def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length,
+                      f_x=None, f_y=None, dt=0.00001, density=1.,
+                      viscosity=0.1, jacobi_iterations=50):
     """Progress the velocities and pressure forward by one timestep of size dt."""
     u_int = u_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity, f_x=f_x)
     v_int = v_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity, f_y=f_y)
@@ -279,6 +308,7 @@ def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, 
     in [0, 1] x [0, 1], and to negate the velocities if the particle hits the wall.
 """
 
+
 @partial(jnp.vectorize, excluded=[1])
 def closest_point(x, num_points):
     lin = jnp.linspace(0, 1, num_points)
@@ -286,9 +316,10 @@ def closest_point(x, num_points):
 
     return jnp.argmin(jnp.abs(x_array - lin))
 
+
 @partial(jit, static_argnames=['bounce'])
 def enforce_lower_boundary(x, dx_dt, bounce=False):
-    if bounce == False:
+    if not bounce:
         return jnp.where(x < 0., 0., x), dx_dt
     else: 
         return jnp.where(x < 0., 0., x), jnp.where(x < 0, -dx_dt, dx_dt)
@@ -296,27 +327,39 @@ def enforce_lower_boundary(x, dx_dt, bounce=False):
 
 @partial(jit, static_argnames=['bounce'])
 def enforce_upper_boundary(x, dx_dt, bounce=False):
-    if bounce == False: 
-        return jnp.where(x > 1, 1, x), dx_dt
+    if not bounce:
+        return jnp.where(x >= 1., 0.999999, x), dx_dt
     else:
-        return jnp.where(x > 1, 1, x), jnp.where(x > 1, -dx_dt, dx_dt)
+        return jnp.where(x >= 1., 0.999999, x), jnp.where(x >= 1., -dx_dt, dx_dt)
+
 
 @partial(jit, static_argnames=['jacobi_iterations', 'bounce'])
 def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_dt_prev, dy_dt_prev, 
                                      u_bound, v_bound, element_length, f_x=None, f_y=None, drag_constant=1, 
                                      dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50, bounce=False):
-    
+
     # Use Euler's Method to find the next x and y values.
     x_next = x_prev + dt * dx_dt_prev
     y_next = y_prev + dt * dy_dt_prev
     
+    # Ensure the particle doesn't go outside the boundaries.
+    x_next, dx_dt_prev = enforce_upper_boundary(x_next, dx_dt_prev, bounce=bounce)
+    x_next, dx_dt_prev = enforce_lower_boundary(x_next, dx_dt_prev, bounce=bounce)
+    
+    y_next, dy_dt_prev = enforce_upper_boundary(y_next, dy_dt_prev, bounce=bounce)
+    y_next, dy_dt_prev = enforce_lower_boundary(y_next, dy_dt_prev, bounce=bounce)
+    
+    # Use Euler's Method to find the next x and y values.
+    x_next = x_prev + dt * dx_dt_prev
+    y_next = y_prev + dt * dy_dt_prev
+
     # Ensure the particle doesn't go outside the boundaries.
     x_next, dx_dt_prev = enforce_lower_boundary(x_next, dx_dt_prev, bounce=bounce)
     x_next, dx_dt_prev = enforce_upper_boundary(x_next, dx_dt_prev, bounce=bounce)
     
     y_next, dy_dt_prev = enforce_lower_boundary(y_next, dy_dt_prev, bounce=bounce)
     y_next, dy_dt_prev = enforce_upper_boundary(y_next, dy_dt_prev, bounce=bounce)
-    
+
     # Find the number of points, to be used in the closest_point function.
     num_points = jnp.shape(u_prev)[0]
     
@@ -333,8 +376,17 @@ def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_
     relative_velocities_y = fluid_velocities_y - dy_dt_prev
     
     # Find the new velocities of the particles.
-    dx_dt_next = dx_dt_prev + drag_constant * dt * viscosity * jnp.square(relative_velocities_x) * jnp.sign(relative_velocities_x)
-    dy_dt_next = dy_dt_prev + drag_constant * dt * viscosity * jnp.square(relative_velocities_y) * jnp.sign(relative_velocities_y)
+    dx_dt_next = (dx_dt_prev + drag_constant * dt * viscosity *
+                  jnp.square(relative_velocities_x) * jnp.sign(relative_velocities_x))
+    dy_dt_next = (dy_dt_prev + drag_constant * dt * viscosity *
+                  jnp.square(relative_velocities_y) * jnp.sign(relative_velocities_y))
+    
+    # Ensure the particle doesn't go outside the boundaries.
+    x_next, dx_dt_prev = enforce_lower_boundary(x_next, dx_dt_prev, bounce=bounce)
+    x_next, dx_dt_prev = enforce_upper_boundary(x_next, dx_dt_prev, bounce=bounce)
+    
+    y_next, dy_dt_prev = enforce_lower_boundary(y_next, dy_dt_prev, bounce=bounce)
+    y_next, dy_dt_prev = enforce_upper_boundary(y_next, dy_dt_prev, bounce=bounce)
     
     # Use the original progress_timestep function to find the next fluid velocities and the next pressure.
     u_next, v_next, p_next = progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, 
@@ -353,10 +405,12 @@ def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_
  
 """
 
-def div(u, v, element_length):
-    div = jnp.zeros_like(u)
-    div[1:-1, 1:-1] = d_dx(u) + d_dy(v)
-    return div
+
+def div(u, v):
+    divergence = jnp.zeros_like(u)
+    divergence[1:-1, 1:-1] = d_dx(u) + d_dy(v)
+    return divergence
+
 
 def kinetic_energy(u, v):
     return jnp.sum(jnp.square(u)) + jnp.sum(jnp.square(v))
