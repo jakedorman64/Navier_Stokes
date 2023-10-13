@@ -351,7 +351,7 @@ def impose_boundary(f, f_bound):
 
 
 @partial(jit, static_argnames=['jacobi_iterations'])
-def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length,
+def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound,
                       f_x=None, f_y=None, dt=0.00001, density=1.,
                       viscosity=0.1, jacobi_iterations=50):
     """
@@ -362,7 +362,6 @@ def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length,
     :param p_prev: nxm array of pressure for current timestep.
     :param u_bound: nxm array of boundary conditions for x component of velocity.
     :param v_bound: nxm array of boundary conditions for y component of velocity.
-    :param element_length: Distance between points.
     :param f_x: nxm array of x component of force at each point.
     :param f_y: nxm array of y component of force at each point.
     :param dt: size of time steps.
@@ -371,6 +370,10 @@ def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length,
     :param jacobi_iterations: Number of times to run the jacobi iterator to update the pressure.
     :return: x component of velocity, y component of velocity, and pressure for next timestep.
     """
+    
+    # This is the distance between points. 
+    element_length = 1 / (u_prev.shape[0] - 1) 
+    
     u_int = u_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity, f_x=f_x)
     v_int = v_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity, f_y=f_y)
     
@@ -459,7 +462,7 @@ def enforce_upper_boundary(x, dx_dt, bounce=False):
 
 @partial(jit, static_argnames=['jacobi_iterations', 'bounce'])
 def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_dt_prev, dy_dt_prev, 
-                                     u_bound, v_bound, element_length, f_x=None, f_y=None, drag_constant=1, 
+                                     u_bound, v_bound, f_x=None, f_y=None, drag_constant=1, 
                                      dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50, bounce=False):
     """
     Progress the velocities and pressure of the fluid, and positions and velocities of the particles,
@@ -474,7 +477,6 @@ def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_
     :param p_prev: nxm array of pressure for current timestep.
     :param u_bound: nxm array of boundary conditions for x component of velocity.
     :param v_bound: nxm array of boundary conditions for y component of velocity.
-    :param element_length: Distance between points.
     :param f_x: nxm array of x component of force at each point.
     :param f_y: nxm array of y component of force at each point.
     :param drag_constant: The drag constant for the particles.
@@ -538,8 +540,8 @@ def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_
     y_next, dy_dt_prev = enforce_upper_boundary(y_next, dy_dt_prev, bounce=bounce)
     
     # Use the original progress_timestep function to find the next fluid velocities and the next pressure.
-    u_next, v_next, p_next = progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, element_length, 
-                                               f_x=f_x, f_y=f_y, dt=dt, density=density, viscosity=viscosity, 
+    u_next, v_next, p_next = progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, f_x=f_x, f_y=f_y, 
+                                               dt=dt, density=density, viscosity=viscosity, 
                                                jacobi_iterations=jacobi_iterations)
     
     return u_next, v_next, p_next, x_next, y_next, dx_dt_next, dy_dt_next
