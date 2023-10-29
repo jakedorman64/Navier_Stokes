@@ -46,10 +46,197 @@
 
 import jax.numpy as jnp
 from jax.config import config
-from jax import jit
+from jax import jit, tree_util
 from functools import partial
 
 config.update("jax_disable_jit", False)
+
+"""
+Create a class to contain our current state. Note that this has to be turned into a jax pytree so that functions 
+can be jitted.
+
+Also, the functions to update the state do not work as class methods, and must instead be separate functions, because
+if they alter self as class methods they are not "pure" functions which jax requires. 
+"""
+
+
+class State:
+    """
+    A class to contain the state of a fluid system.
+    
+    :param X: nxn array containing the X values (horizontal distances) at each point.
+    :param Y: nxn array containing the Y values (vertical distances) at each point.
+    :param u: nxn array containing the x velocity at each point.
+    :param v: nxn array containing the y velocity at each point.
+    :param p: nxn array containing the pressure at each point.
+    :param u_bound: nxn array representing the boundary conditions that should be applied to the outer edge at each
+    point for the values of u.
+    :param v_bound: nxn array representing the boundary conditions that should be applied to the outer edge at each
+    point for the values of v.
+    :param f_x: nxn array containing the external force in the x direction to be applied at each point. Only used if
+    not using Boussinesq Approximation (i.e. T=None)
+    :param f_y: nxn array containing the external force in the y direction to be applied at each point. Only used if
+    not using Boussinesq Approximation (i.e. T=None)
+    :param dt: scalar, representing the size of one timestep.
+    :param density: scalar, representing the density at each point. If using Boussinesq Approximation, this is taken
+    as the constant component of the density.
+    :param T: nxn array or None. If nxn array, this represents the temperature at each point
+    :param T0: Scalar, representing average temperature at each point.
+    :param expansion: Scalar, the coefficient of thermal expansion (alpha) in the Boussinesq Approximation.
+    :param g: Scalar, representing the strength of gravity.
+    :param conductivity: Scalar, thermal conductivity (k) in the Boussinesq Approximation.
+    :param capacity: Scalar, thermal conductivity (k) in the Boussinesq Approximation.
+    :param heat_production: nxn array, representing the amount of heat production at each point.
+    :param viscosity: scalar, the viscosity of the fluid.
+    :param jacobi_iterations: Scalar, the number of iterations to use to solve for the pressure.
+    """
+
+    def __init__(self, X, Y, u, v, p, u_bound, v_bound, 
+                 f_x=None, f_y=None, dt=0.00001, density=1.,
+                 T=None, T0=0, expansion=10, g=-1000,
+                 conductivity=1000, capacity=1000, heat_production=None,
+                 viscosity=0.1, jacobi_iterations=50):
+        """Constructor method."""
+        self.X = X
+        self.Y = Y
+        self.u = u
+        self.v = v
+        self.p = p
+        self.u_bound = u_bound
+        self.v_bound = v_bound
+        self.f_x = f_x
+        self.f_y = f_y
+        self.dt = dt
+        self.density = density
+        self.T = T
+        self.T0 = T0
+        self.expansion = expansion
+        self.g = g
+        self.conductivity = conductivity
+        self.capacity = capacity
+        self.heat_production = heat_production
+        self.viscosity = viscosity
+        self.jacobi_iterations = jacobi_iterations
+        self.element_length = 1 / (self.u.shape[0] - 1) 
+    
+    def _tree_flatten(self):
+        """
+        Define the pytree flatten function. children are variables that can be altered (so treated like jax jitted
+        object. aux_data is any non-variable objects, like booleans or things to be iterated over.
+
+        :return: tuple of children and aux_data.
+        """
+        children = (self.X, self.Y, self.u, self.v, self.p, self.u_bound, self.v_bound, self.f_x, self.f_y, 
+                    self.dt, self.density, self.T, self.T0, self.expansion, self.g, 
+                    self.conductivity, self.capacity, self.heat_production, self.viscosity, self.element_length) 
+        aux_data = {'jacobi_iterations': self.jacobi_iterations} 
+        return (children, aux_data)
+
+    @classmethod
+    def _tree_unflatten(cls, aux_data, children):
+        """
+        Define the pytree unflatten function. The @classmethod wrapper must be used so that the input variables are in
+        the right place for jax to recognise it when turning this into a pytree.
+        :param aux_data: The auxilary data defined in _tree_flatten
+        :param children: The children defined in _tree_flatten
+        :return: the State with those children and auxilary data.
+        """
+        return cls(*children, **aux_data)
+
+
+# This turns the State class into a jax pytree.
+tree_util.register_pytree_node(State, State._tree_flatten, State._tree_unflatten)
+
+"""
+Another class will be made to contain particle information too. This can inherit from the other class. 
+"""
+
+
+class StateWithParticles(State):
+    """
+    Define a class to represent the state of the current system. This class includes particle data.
+
+    :param X: nxn array containing the X values (horizontal distances) at each point.
+    :param Y: nxn array containing the Y values (vertical distances) at each point.
+    :param u: nxn array containing the x velocity at each point.
+    :param v: nxn array containing the y velocity at each point.
+    :param p: nxn array containing the pressure at each point.
+    :param x: List or px1 array containing the x coordinates of the p points.
+    :param y: List or px1 array containing the y coordinates of the p points.
+    :param dx_dt: List or px1 array containing the x derivatives of the p
+    :param dy_dt:
+    :param u_bound: nxn array representing the boundary conditions that should be applied to the outer edge at each
+    point for the values of u.
+    :param v_bound: nxn array representing the boundary conditions that should be applied to the outer edge at each
+    point for the values of v.
+    :param f_x: nxn array containing the external force in the x direction to be applied at each point. Only used if
+    not using Boussinesq Approximation (i.e. T=None)
+    :param f_y: nxn array containing the external force in the y direction to be applied at each point. Only used if
+    not using Boussinesq Approximation (i.e. T=None)
+    :param drag_constant: Scalar, the drag constant for the particles.
+    :param dt: scalar, representing the size of one timestep.
+    :param density: scalar, representing the density at each point. If using Boussinesq Approximation, this is taken
+    as the constant component of the density.
+    :param T: nxn array or None. If nxn array, this represents the temperature at each point
+    :param T0: Scalar, representing average temperature at each point.
+    :param expansion: Scalar, the coefficient of thermal expansion (alpha) in the Boussinesq Approximation.
+    :param g: Scalar, representing the strength of gravity.
+    :param conductivity: Scalar, thermal conductivity (k) in the Boussinesq Approximation.
+    :param capacity: Scalar, thermal conductivity (k) in the Boussinesq Approximation.
+    :param heat_production: nxn array, representing the amount of heat production at each point.
+    :param viscosity: scalar, the viscosity of the fluid.
+    :param jacobi_iterations: Scalar, the number of iterations to use to solve for the pressure.
+    :param bounce: Bool, whether particles should bounce when they hit a boundary.
+    """
+    def __init__(self, X, Y, u, v, p, x, y, dx_dt, dy_dt, u_bound, v_bound, 
+                 f_x=None, f_y=None, drag_constant=10, dt=0.00001, density=1., 
+                 T=None, T0=None, expansion=1, g=9.81,
+                conductivity=1, capacity=1, heat_production=1,
+                 viscosity=0.1, jacobi_iterations=50, bounce=True):
+        """Constructor Method."""
+        State.__init__(self, X, Y, u, v, p, u_bound, v_bound, f_x, f_y, dt, 
+                       density, T, T0, expansion, g, 
+                       conductivity, capacity, heat_production,
+                       viscosity, jacobi_iterations)
+        self.x = x
+        self.y = y
+        self.dx_dt = dx_dt
+        self.dy_dt = dy_dt
+        self.drag_constant = drag_constant
+        self.bounce = bounce
+     
+    def _tree_flatten(self):
+        """
+        Define the pytree flatten function. children are variables that can be altered (so treated like jax jitted
+        object. aux_data is any non-variable objects, like booleans or things to be iterated over.
+
+        :return: tuple of children and aux_data.
+        """
+        children = (self.X, self.Y, self.u, self.v, self.p, self.x, self.y, self.dx_dt, self.dy_dt, self.u_bound, self.v_bound, 
+                    self.f_x, self.f_y, self.drag_constant, self.dt, self.density, self.T, self.T0, self.expansion, self.g,
+                    self.conductivity, self.capacity, self.heat_production, self.viscosity) 
+        
+        aux_data = {'jacobi_iterations': self.jacobi_iterations, 'bounce': self.bounce}
+        return (children, aux_data)
+
+    @classmethod
+    def _tree_unflatten(cls, aux_data, children):
+        """
+        Define the pytree unflatten function. The @classmethod wrapper must be used so that the input variables are in
+        the right place for jax to recognise it when turning this into a pytree.
+
+        :param aux_data: The auxilary data defined in _tree_flatten
+        :param children: The children defined in _tree_flatten
+        :return: the State with those children and auxilary data.
+        """
+        return cls(*children, **aux_data)
+
+
+# This turns the StateWithParticles class into a jax pytree.
+tree_util.register_pytree_node(StateWithParticles,
+                               StateWithParticles._tree_flatten,
+                               StateWithParticles._tree_unflatten)
+
 
 """Derivative Functions.
 
@@ -163,49 +350,53 @@ def laplacian(f, element_length):
 
 
 @jit
-def u_intermediate(u, v, element_length, f_x=None, dt=0.00001, viscosity=0.1):
+def u_intermediate(state):
     """
     Calculates the intermediate velocities in the x direction.
 
-    :param u: nxm array of x component of velocities at each point
-    :param v: nxm array of y component of velocities at each point
-    :param element_length: Distance between points
-    :param f_x: nxm array of x component of force at each point
-    :param dt: size of time steps
-    :param viscosity: viscosity of the fluid
-    :return: intermediate x component of velocity for next timestep
+    :param state: State or StateWithParticles class.
+    :return: State with state.u updated to the intermediate value.
     """
-    if f_x is None:
-        return (u - dt * (jnp.multiply(u, d_dx(u, element_length)) +
-                jnp.multiply(v, d_dy(u, element_length))) +
-                dt * viscosity * laplacian(u, element_length))
+    if state.T is not None:
+        state.u = (state.u - state.dt * (jnp.multiply(state.u, d_dx(state.u, state.element_length)) +
+                   jnp.multiply(state.v, d_dy(state.u, state.element_length))) +
+                   state.dt * (state.viscosity * laplacian(state.u, state.element_length) +
+                   state.g * (d_dx(state.Y, state.element_length) + d_dy(state.Y, state.element_length)) -
+                   state.g * state.expansion * (state.T - state.T0)))
+    elif state.f_x is None:
+        state.u = (state.u - state.dt * (jnp.multiply(state.u, d_dx(state.u, state.element_length)) +
+                   jnp.multiply(state.v, d_dy(state.u, state.element_length))) +
+                   state.dt * state.viscosity * laplacian(state.u, state.element_length))
     else:
-        return (u - dt * (jnp.multiply(u, d_dx(u, element_length)) +
-                jnp.multiply(v, d_dy(u, element_length))) +
-                dt * (viscosity * laplacian(u, element_length) + f_x))
+        state.u = (state.u - state.dt * (jnp.multiply(state.u, d_dx(state.u, state.element_length)) +
+                   jnp.multiply(state.v, d_dy(state.u, state.element_length))) +
+                   state.dt * (state.viscosity * laplacian(state.u, state.element_length) + state.f_x))
+    return state
 
 
 @jit
-def v_intermediate(u, v, element_length, f_y=None, dt=0.00001, viscosity=0.1):
+def v_intermediate(state):
     """
     Calculates the intermediate velocities in the y direction.
 
-    :param u: nxm array of x component of velocities at each point
-    :param v: nxm array of y component of velocities at each point
-    :param element_length: Distance between points
-    :param f_y: nxm array of y component of force at each point
-    :param dt: size of time steps
-    :param viscosity: viscosity of the fluid
-    :return: intermediate x component of velocity for next timestep
+    :param state: State or StateWithParticles class.
+    :return: State with state.v updated to the intermediate value.
     """
-    if f_y is None:
-        return (v - dt * (jnp.multiply(u, d_dx(v, element_length)) +
-                jnp.multiply(v, d_dy(v, element_length))) +
-                dt * viscosity * laplacian(v, element_length))
+    if state.T is not None:
+        state.v = (state.v - state.dt * (jnp.multiply(state.u, d_dx(state.v, state.element_length)) +
+        jnp.multiply(state.v, d_dy(state.v, state.element_length))) +
+        state.dt * (state.viscosity * laplacian(state.v, state.element_length) + 
+                    state.g * (d_dx(state.Y, state.element_length) + d_dy(state.Y, state.element_length)) - 
+                    state.g * state.expansion * (state.T - state.T0)))
+    elif state.f_y is None:
+        state.v = (state.v - state.dt * (jnp.multiply(state.u, d_dx(state.v, state.element_length)) +
+                jnp.multiply(state.v, d_dy(state.v, state.element_length))) +
+                state.dt * state.viscosity * laplacian(state.v, state.element_length))
     else:
-        return (v - dt * (jnp.multiply(u, d_dx(v, element_length)) +
-                jnp.multiply(v, d_dy(v, element_length))) +
-                dt * (viscosity * laplacian(v, element_length) + f_y))
+        state.v = (state.v - state.dt * (jnp.multiply(state.u, d_dx(state.v, state.element_length)) +
+                jnp.multiply(state.v, d_dy(state.v, state.element_length))) +
+                state.dt * (state.viscosity * laplacian(state.v, state.element_length) + state.f_y))
+    return state
 
 
 """Step 2: Update Pressure. 
@@ -229,36 +420,30 @@ def v_intermediate(u, v, element_length, f_y=None, dt=0.00001, viscosity=0.1):
 """
 
 
-@partial(jit, static_argnames=['jacobi_iterations'])
-def p_update(u, v, p_prev, element_length, dt=0.00001, density=1., jacobi_iterations=50):
+@jit
+def p_update(state):
     """
     Update the pressure to the next timestep using the Jacobi Iterative Procedure.
 
-    :param u: nxm array of x component of intermediate velocities at each point
-    :param v: nxm array of y component of intermediate velocities at each point
-    :param p_prev: nxm array of pressure at each point
-    :param element_length: Distance between points
-    :param dt: size of time steps
-    :param density: density of the fluid
-    :param jacobi_iterations: number of times to run the jacobi iterator to update the pressure
-    :return: updated pressure for next timestep
+    :param state: State or StateWithParticles class.
+    :return: State with state.p updated to next timestep
     """
     
     # Define the right hand side of the pressure equation.
-    rhs = density / dt * (d_dx(u, element_length) + d_dy(v, element_length))
+    rhs = state.density / state.dt * (d_dx(state.u, state.element_length) + d_dy(state.v, state.element_length))
 
-    for i in range(jacobi_iterations):
-        p_next = jnp.zeros_like(p_prev)
+    for i in range(state.jacobi_iterations):
+        p_next = jnp.zeros_like(state.p)
         p_next = p_next.at[1:-1, 1:-1].set(1/4 * (
-            p_prev[1:-1, 0:-2]
+            state.p[1:-1, 0:-2]
             +
-            p_prev[0:-2, 1:-1]
+            state.p[0:-2, 1:-1]
             +
-            p_prev[1:-1, 2:]
+            state.p[1:-1, 2:]
             +
-            p_prev[2:, 1:-1]
+            state.p[2:, 1:-1]
             -
-            element_length**2
+            state.element_length**2
             *
             rhs[1:-1, 1:-1]))
         
@@ -267,9 +452,9 @@ def p_update(u, v, p_prev, element_length, dt=0.00001, density=1., jacobi_iterat
         p_next = p_next.at[:, 0].set(p_next[:, 1])
         p_next = p_next.at[-1, :].set(p_next[-1, :])
 
-        p_prev = p_next
+        state.p = p_next
 
-    return p_next
+    return state
 
 
 """Step 3: Correct Velocities.
@@ -286,33 +471,27 @@ def p_update(u, v, p_prev, element_length, dt=0.00001, density=1., jacobi_iterat
 
 
 @jit
-def u_update(u, p, element_length, dt=0.00001, density=1.):
+def u_update(state):
     """
     Updates the velocities in the x direction to the next timestep.
 
-    :param u: nxm array of x component of intermediate velocities at each point
-    :param p: nxm array of updated pressure at each point
-    :param element_length: Distance between points
-    :param dt: size of time steps
-    :param density: density of the fluid
-    :return: nxm array of final x component of velocity for next timestep
+    :param state: State or StateWithParticles class.
+    :return: State with state.u updated to the next timestep.
     """
-    return u - (dt / density) * d_dx(p, element_length)
+    state.u = state.u - (state.dt / state.density) * d_dx(state.p, state.element_length)
+    return state
 
 
 @jit
-def v_update(v, p, element_length, dt=0.00001, density=1.):
+def v_update(state):
     """
     Updates the velocities in the x direction to the next timestep.
 
-    :param v: nxm array of y component of intermediate velocities at each point
-    :param p: nxm array of updated pressure at each point
-    :param element_length: Distance between points
-    :param dt: size of time steps
-    :param density: density of the fluid
-    :return: nxm array of final y component of velocity for next timestep
+    :param state: State or StateWithParticles class.
+    :return: State with state.v updated to the next timestep.
     """
-    return v - (dt / density) * d_dy(p, element_length)
+    state.v = state.v - (state.dt / state.density) * d_dy(state.p, state.element_length)
+    return state
 
 
 """Impose the Dirichlet boundary conditions for velocity. 
@@ -320,7 +499,6 @@ def v_update(v, p, element_length, dt=0.00001, density=1.):
     Imposing the Dirichlet boundary conditions just requires changing the outer perimeter of points to that 
     of the initial values. 
 """
-
 
 @jit
 def impose_boundary(f, f_bound):
@@ -337,60 +515,54 @@ def impose_boundary(f, f_bound):
     f = f.at[-1, :].set(f_bound[-1, :])
     return f
 
-
-"""Create a function to progress by 1 timestep. 
-
-    To step forward one timestep, the following must be done:
-
-        1: Calculate the intermediate velocities.
-        2: Impose the boundary conditions on the intermediate velocities.
-        3: Calculate the pressure. (boundary conditions for pressure are already imposed in the Jacobi procedure.)
-        4: Correct the velocities. 
-        5: Impose the boundary conditions on the corrected velocities.
-"""
-
-
-@partial(jit, static_argnames=['jacobi_iterations'])
-def progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound,
-                      f_x=None, f_y=None, dt=0.00001, density=1.,
-                      viscosity=0.1, jacobi_iterations=50):
+@jit
+def update_temperature(state):
     """
-    Progress the velocities and pressure forward by one timestep of size dt.
+    Updates the temperature to the next timestep.
 
-    :param u_prev: nxm array of x components of velocity for current timestep.
-    :param v_prev: nxm array of y components of velocity for current timestep.
-    :param p_prev: nxm array of pressure for current timestep.
-    :param u_bound: nxm array of boundary conditions for x component of velocity.
-    :param v_bound: nxm array of boundary conditions for y component of velocity.
-    :param f_x: nxm array of x component of force at each point.
-    :param f_y: nxm array of y component of force at each point.
-    :param dt: size of time steps.
-    :param density: Density of the fluid.
-    :param viscosity: Viscosity of the fluid.
-    :param jacobi_iterations: Number of times to run the jacobi iterator to update the pressure.
-    :return: x component of velocity, y component of velocity, and pressure for next timestep.
+    :param state: State or StateWithParticles class.
+    :return: State with state.T updated to the next timestep.
     """
+    density_T = state.density - state.expansion * state.density * (state.T - state.T0)
+    state.T = state.T + state.dt * (- (state.u * d_dx(state.T, state.element_length)
+                                       + state.v * d_dy(state.T, state.element_length))
+                                    + state.conductivity/(density_T * state.capacity)
+                                    * laplacian(state.T, state.element_length) +
+                                    state.heat_production / density_T * state.capacity)
     
-    # This is the distance between points. 
-    element_length = 1 / (u_prev.shape[0] - 1) 
-    
-    u_int = u_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity, f_x=f_x)
-    v_int = v_intermediate(u_prev, v_prev, element_length, dt=dt, viscosity=viscosity, f_y=f_y)
-    
-    u_int = impose_boundary(u_int, u_bound)
-    v_int = impose_boundary(v_int, v_bound)
-
-    p_next = p_update(u_int, v_int, p_prev, element_length, dt=dt, density=density, jacobi_iterations=jacobi_iterations)
-    
-    u_next = u_update(u_int, p_next, element_length, dt=dt, density=density)
-    v_next = v_update(v_int, p_next, element_length, dt=dt, density=density)
-    
-    u_next = impose_boundary(u_next, u_bound)
-    v_next = impose_boundary(v_next, v_bound)
-    
-    return u_next, v_next, p_next
+    state.T = state.T.at[:, -1].set(state.T[:, -2])
+    state.T = state.T.at[0, :].set(state.T[1, :])
+    state.T = state.T.at[:, 0].set(state.T[:, 1])
+    state.T = state.T.at[-1, :].set(state.T[-1, :])
+    return state
 
 
+@jit
+def progress_timestep(state):
+    """
+    Progress the velocities, pressure and temperature forward by one timestep of size dt.
+
+    :param state: State or StateWithParticles class.
+    :return: State with u, v, p and T updated to the next timestep.
+    """
+    state = u_intermediate(state)
+    state = v_intermediate(state)
+    
+    state.u = impose_boundary(state.u, state.u_bound)
+    state.v = impose_boundary(state.v, state.v_bound)
+
+    state = p_update(state)
+    
+    state = u_update(state)
+    state = v_update(state)
+    
+    state.u = impose_boundary(state.u, state.u_bound)
+    state.v = impose_boundary(state.v, state.v_bound)
+    state = update_temperature(state)
+    
+    return state
+    
+    
 """Create a function to progress by one timestep, that also updates n body particle positions. 
 
     The formulas used to update the position x and velocity v of the particle are:
@@ -427,124 +599,93 @@ def closest_point(x, num_points):
 
     return jnp.argmin(jnp.abs(x_array - lin))
 
-
-@partial(jit, static_argnames=['bounce'])
-def enforce_lower_boundary(x, dx_dt, bounce=False):
+@jit
+def enforce_lower_boundary(state):
     """
     Ensures particles stay above 0, plus optionally makes them bounce from bottom boundaries.
 
-    :param x: Vector of points between 0 and 1.
-    :param dx_dt: Vector of velocities of points in x.
-    :param bounce: Bool, whether the particle should bounce when it hits a wall or not.
-    :return: x, dx_dt with x values bounded below by 0 and (if bounce = True) dx_dt * -1 where x was <0.
+    :param state: State or StateWithParticles class.
+    :return: State, with state.x and state.y bounded below by 0, and if state.bounce==True, state.dx_dt and state.dy_dt
+    multiplied by -1 in points where the state.x and state.y values were previously less than 0.
     """
-    if not bounce:
-        return jnp.where(x < 0., 0., x), dx_dt
-    else: 
-        return jnp.where(x < 0., 0., x), jnp.where(x < 0, -dx_dt, dx_dt)
-        
+    if state.bounce:
+        state.dx_dt = jnp.where(state.x < 0, -state.dx_dt, state.dx_dt)
+        state.dy_dt = jnp.where(state.y < 0, -state.dy_dt, state.dy_dt)
+    state.x = jnp.where(state.x < 0., 0., state.x)
+    state.y = jnp.where(state.y < 0., 0., state.y)
+    return state      
 
-@partial(jit, static_argnames=['bounce'])
-def enforce_upper_boundary(x, dx_dt, bounce=False):
+@jit
+def enforce_upper_boundary(state):
     """
-    Ensures particles stay below 1, plus optionally makes them bounce from top boundaries.
+    Ensures particles stay above 0, plus optionally makes them bounce from bottom boundaries.
 
-    :param x: Vector of points between 0 and 1.
-    :param dx_dt: Vector of velocities of points in x.
-    :param bounce: Bool, whether the particle should bounce when it hits a wall or not.
-    :return: x, dx_dt with x values bounded above by 1 and (if bounce = True) dx_dt * -1 where x was >1.
+    :param state: State or StateWithParticles class.
+    :return: State, with state.x and state.y bounded above by 1, and if state.bounce==True, state.dx_dt and state.dy_dt
+    multiplied by -1 in points where the state.x and state.y values were previously greater than 1.
     """
-    if not bounce:
-        return jnp.where(x >= 1., 0.999999, x), dx_dt
-    else:
-        return jnp.where(x >= 1., 0.999999, x), jnp.where(x >= 1., -dx_dt, dx_dt)
+    if state.bounce:
+        state.dx_dt = jnp.where(state.x >= 0.99999, -state.dx_dt, state.dx_dt)
+        state.dy_dt = jnp.where(state.y >= 0.99999, -state.dy_dt, state.dy_dt)
+    state.x = jnp.where(state.x >= 1., 0.999999, state.x)
+    state.y = jnp.where(state.y >= 1., 0.999999, state.y)
+    return state
 
 
-@partial(jit, static_argnames=['jacobi_iterations', 'bounce'])
-def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_dt_prev, dy_dt_prev, 
-                                     u_bound, v_bound, f_x=None, f_y=None, drag_constant=1, 
-                                     dt=0.00001, density=1., viscosity=0.1, jacobi_iterations=50, bounce=False):
+@jit
+def progress_timestep_with_particles(state):
     """
-    Progress the velocities and pressure of the fluid, and positions and velocities of the particles,
-    forward by one timestep of size dt.
+    Progress the fluid velocities, pressure and temperature, and particle positions and velocities, forward by one
+    timestep of size dt.
 
-    :param u_prev: nxm array of x components of velocity for current timestep.
-    :param v_prev: nxm array of y components of velocity for current timestep.
-    :param x_prev: vector of the x positions of the particles for current timestep.
-    :param y_prev: vector of the y positions of the particles for current timestep.
-    :param dx_dt_prev: Vector of the x velocities of the particles for current timestep.
-    :param dy_dt_prev: Vector of the y velocities of the particles for current timestep.
-    :param p_prev: nxm array of pressure for current timestep.
-    :param u_bound: nxm array of boundary conditions for x component of velocity.
-    :param v_bound: nxm array of boundary conditions for y component of velocity.
-    :param f_x: nxm array of x component of force at each point.
-    :param f_y: nxm array of y component of force at each point.
-    :param drag_constant: The drag constant for the particles.
-    :param dt: size of time steps.
-    :param density: Density of the fluid.
-    :param viscosity: Viscosity of the fluid.
-    :param jacobi_iterations: Number of times to run the jacobi iterator to update the pressure.
-    :param bounce: Bool, saying whether the particles should bounce off walls or not.
-    :return: x component of velocity, y component of velocity, pressure, x positions of particles,
-    y positions of particles, x velocities of particles and y velocities of particles for next timestep.
+    :param state: State or StateWithParticles class.
+    :return: State with u, v, p, x, y, dx_dt, dy_dt and T updated to the next timestep.
     """
-
     # Use Euler's Method to find the next x and y values.
-    x_next = x_prev + dt * dx_dt_prev
-    y_next = y_prev + dt * dy_dt_prev
+    state.x = state.x + state.dt * state.dx_dt
+    state.y = state.y + state.dt * state.dy_dt
     
     # Ensure the particle doesn't go outside the boundaries.
-    x_next, dx_dt_prev = enforce_upper_boundary(x_next, dx_dt_prev, bounce=bounce)
-    x_next, dx_dt_prev = enforce_lower_boundary(x_next, dx_dt_prev, bounce=bounce)
-    
-    y_next, dy_dt_prev = enforce_upper_boundary(y_next, dy_dt_prev, bounce=bounce)
-    y_next, dy_dt_prev = enforce_lower_boundary(y_next, dy_dt_prev, bounce=bounce)
+    state = enforce_upper_boundary(state)
+    state = enforce_lower_boundary(state)
     
     # Use Euler's Method to find the next x and y values.
-    x_next = x_prev + dt * dx_dt_prev
-    y_next = y_prev + dt * dy_dt_prev
+    state.x = state.x + state.dt * state.dx_dt
+    state.y = state.y + state.dt * state.dy_dt
 
     # Ensure the particle doesn't go outside the boundaries.
-    x_next, dx_dt_prev = enforce_lower_boundary(x_next, dx_dt_prev, bounce=bounce)
-    x_next, dx_dt_prev = enforce_upper_boundary(x_next, dx_dt_prev, bounce=bounce)
-    
-    y_next, dy_dt_prev = enforce_lower_boundary(y_next, dy_dt_prev, bounce=bounce)
-    y_next, dy_dt_prev = enforce_upper_boundary(y_next, dy_dt_prev, bounce=bounce)
+    state = enforce_upper_boundary(state)
+    state = enforce_lower_boundary(state)
 
     # Find the number of points, to be used in the closest_point function.
-    num_points = jnp.shape(u_prev)[0]
+    num_points = jnp.shape(state.u)[0]
     
     # Find the index x and y values for both particles. 
-    x_index = closest_point(x_prev, num_points)
-    y_index = closest_point(y_prev, num_points)
+    x_index = closest_point(state.x, num_points)
+    y_index = closest_point(state.y, num_points)
     
     # Find the velocities of the fluid at the location of each particle. 
-    fluid_velocities_x = u_prev[y_index, x_index]
-    fluid_velocities_y = v_prev[y_index, x_index]
+    fluid_velocities_x = state.u[y_index, x_index]
+    fluid_velocities_y = state.v[y_index, x_index]
     
     # Find the relative velocity of the fluid to the particle.
-    relative_velocities_x = fluid_velocities_x - dx_dt_prev
-    relative_velocities_y = fluid_velocities_y - dy_dt_prev
+    relative_velocities_x = fluid_velocities_x - state.dx_dt
+    relative_velocities_y = fluid_velocities_y - state.dy_dt
     
     # Find the new velocities of the particles.
-    dx_dt_next = (dx_dt_prev + drag_constant * dt * viscosity *
-                  jnp.square(relative_velocities_x) * jnp.sign(relative_velocities_x))
-    dy_dt_next = (dy_dt_prev + drag_constant * dt * viscosity *
-                  jnp.square(relative_velocities_y) * jnp.sign(relative_velocities_y))
+    state.dx_dt = (state.dx_dt + state.drag_constant * state.dt * state.viscosity *
+                jnp.square(relative_velocities_x) * jnp.sign(relative_velocities_x))
+    state.dy_dt = (state.dy_dt + state.drag_constant * state.dt * state.viscosity *
+                jnp.square(relative_velocities_y) * jnp.sign(relative_velocities_y))
     
     # Ensure the particle doesn't go outside the boundaries.
-    x_next, dx_dt_prev = enforce_lower_boundary(x_next, dx_dt_prev, bounce=bounce)
-    x_next, dx_dt_prev = enforce_upper_boundary(x_next, dx_dt_prev, bounce=bounce)
+    state = enforce_upper_boundary(state)
+    state = enforce_lower_boundary(state)
     
-    y_next, dy_dt_prev = enforce_lower_boundary(y_next, dy_dt_prev, bounce=bounce)
-    y_next, dy_dt_prev = enforce_upper_boundary(y_next, dy_dt_prev, bounce=bounce)
+    # Use the original progress_timestep method to find the next fluid velocities and the next pressure.
+    state = progress_timestep(state)
     
-    # Use the original progress_timestep function to find the next fluid velocities and the next pressure.
-    u_next, v_next, p_next = progress_timestep(u_prev, v_prev, p_prev, u_bound, v_bound, f_x=f_x, f_y=f_y, 
-                                               dt=dt, density=density, viscosity=viscosity, 
-                                               jacobi_iterations=jacobi_iterations)
-    
-    return u_next, v_next, p_next, x_next, y_next, dx_dt_next, dy_dt_next
+    return state
 
 
 """ Testing the legitimacy of the solution. 
@@ -558,10 +699,27 @@ def progress_timestep_with_particles(u_prev, v_prev, p_prev, x_prev, y_prev, dx_
 
 
 def div(u, v):
+    """
+    Find the divergence of a 2D vector field.
+
+    :param u: nxn array, the x velocities of the vector field.
+    :param v: nxn array, the y velocities of the vector field.
+    :return: nxn array of the divergence of the vector field.
+    """
     divergence = jnp.zeros_like(u)
     divergence[1:-1, 1:-1] = d_dx(u) + d_dy(v)
     return divergence
 
 
 def kinetic_energy(u, v):
+    """
+    Find the kinetic energy of a system, assuming the mass in each square is 1.
+
+    :param u: nxn array, the x velocities of the vector field.
+    :param v: nxn array, the y velocities of the vector field.
+    :return: nxn array of the kinetic energy of the vector field.
+    """
     return jnp.sum(jnp.square(u)) + jnp.sum(jnp.square(v))
+        
+    
+        
