@@ -93,8 +93,8 @@ class State:
 
     def __init__(self, X, Y, u, v, p, u_bound, v_bound, 
                  f_x=None, f_y=None, dt=0.00001, density=1.,
-                 T=None, T0=0, expansion=10, g=-1000,
-                 conductivity=1000, capacity=1000, heat_production=None,
+                 T=None, T0=0, T_bound=None, expansion=1000000, g=-1000,
+                 conductivity=1000, capacity=10, heat_production=None,
                  viscosity=0.1, jacobi_iterations=50):
         """Constructor method."""
         self.X = X
@@ -110,6 +110,7 @@ class State:
         self.density = density
         self.T = T
         self.T0 = T0
+        self.T_bound = T_bound
         self.expansion = expansion
         self.g = g
         self.conductivity = conductivity
@@ -127,7 +128,7 @@ class State:
         :return: tuple of children and aux_data.
         """
         children = (self.X, self.Y, self.u, self.v, self.p, self.u_bound, self.v_bound, self.f_x, self.f_y, 
-                    self.dt, self.density, self.T, self.T0, self.expansion, self.g, 
+                    self.dt, self.density, self.T, self.T0, self.T_bound, self.expansion, self.g, 
                     self.conductivity, self.capacity, self.heat_production, self.viscosity, self.element_length) 
         aux_data = {'jacobi_iterations': self.jacobi_iterations} 
         return (children, aux_data)
@@ -190,12 +191,12 @@ class StateWithParticles(State):
     """
     def __init__(self, X, Y, u, v, p, x, y, dx_dt, dy_dt, u_bound, v_bound, 
                  f_x=None, f_y=None, drag_constant=10, dt=0.00001, density=1., 
-                 T=None, T0=None, expansion=1, g=9.81,
+                 T=None, T0=None, T_bound=None, expansion=1, g=9.81,
                 conductivity=1, capacity=1, heat_production=1,
                  viscosity=0.1, jacobi_iterations=50, bounce=True):
         """Constructor Method."""
         State.__init__(self, X, Y, u, v, p, u_bound, v_bound, f_x, f_y, dt, 
-                       density, T, T0, expansion, g, 
+                       density, T, T0, T_bound, expansion, g, 
                        conductivity, capacity, heat_production,
                        viscosity, jacobi_iterations)
         self.x = x
@@ -213,8 +214,8 @@ class StateWithParticles(State):
         :return: tuple of children and aux_data.
         """
         children = (self.X, self.Y, self.u, self.v, self.p, self.x, self.y, self.dx_dt, self.dy_dt, self.u_bound, self.v_bound, 
-                    self.f_x, self.f_y, self.drag_constant, self.dt, self.density, self.T, self.T0, self.expansion, self.g,
-                    self.conductivity, self.capacity, self.heat_production, self.viscosity) 
+                    self.f_x, self.f_y, self.drag_constant, self.dt, self.density, self.T, self.T0, self.T_bound, self.expansion, 
+                    self.g, self.conductivity, self.capacity, self.heat_production, self.viscosity) 
         
         aux_data = {'jacobi_iterations': self.jacobi_iterations, 'bounce': self.bounce}
         return (children, aux_data)
@@ -528,12 +529,19 @@ def update_temperature(state):
                                        + state.v * d_dy(state.T, state.element_length))
                                     + state.conductivity/(density_T * state.capacity)
                                     * laplacian(state.T, state.element_length) +
-                                    state.heat_production / density_T * state.capacity)
+                                    state.heat_production / (density_T * state.capacity))
     
-    state.T = state.T.at[:, -1].set(state.T[:, -2])
-    state.T = state.T.at[0, :].set(state.T[1, :])
-    state.T = state.T.at[:, 0].set(state.T[:, 1])
-    state.T = state.T.at[-1, :].set(state.T[-1, :])
+    if state.T_bound is None:
+        state.T = state.T.at[:, -1].set(state.T[:, -2])
+        state.T = state.T.at[0, :].set(state.T[1, :])
+        state.T = state.T.at[:, 0].set(state.T[:, 1])
+        state.T = state.T.at[-1, :].set(state.T[-2, :])
+    else:
+        state.T = impose_boundary(state.T, state.T_bound)
+        state.T = state.T.at[:, -1].set(state.T[:, -2])
+        state.T = state.T.at[0, :].set(state.T[1, :])
+        state.T = state.T.at[:, 0].set(state.T[:, 1])
+        
     return state
 
 
@@ -545,6 +553,7 @@ def progress_timestep(state):
     :param state: State or StateWithParticles class.
     :return: State with u, v, p and T updated to the next timestep.
     """
+    
     state = u_intermediate(state)
     state = v_intermediate(state)
     
@@ -558,7 +567,9 @@ def progress_timestep(state):
     
     state.u = impose_boundary(state.u, state.u_bound)
     state.v = impose_boundary(state.v, state.v_bound)
-    state = update_temperature(state)
+    
+    if state.T is not None:
+        state = update_temperature(state)
     
     return state
     
@@ -698,28 +709,28 @@ def progress_timestep_with_particles(state):
 """
 
 
-def div(u, v):
+def div(state):
     """
     Find the divergence of a 2D vector field.
 
-    :param u: nxn array, the x velocities of the vector field.
-    :param v: nxn array, the y velocities of the vector field.
+    :param u: nxn array, Velocity of field in x direction.
+    :param v: nxn array, Velocity of field in y direction. 
     :return: nxn array of the divergence of the vector field.
     """
-    divergence = jnp.zeros_like(u)
-    divergence[1:-1, 1:-1] = d_dx(u) + d_dy(v)
+    divergence = jnp.zeros_like(state.u)
+    divergence = divergence.at[1:-1, 1:-1].set(d_dx(state.u, state.element_length)[1:-1, 1:-1] - d_dy(state.v, state.element_length)[1:-1, 1:-1])
     return divergence
 
 
-def kinetic_energy(u, v):
+def kinetic_energy(state):
     """
     Find the kinetic energy of a system, assuming the mass in each square is 1.
 
-    :param u: nxn array, the x velocities of the vector field.
-    :param v: nxn array, the y velocities of the vector field.
-    :return: nxn array of the kinetic energy of the vector field.
+    :param state: State class of the system.
+    :return: The current kinetic energy of the system. 
     """
-    return jnp.sum(jnp.square(u)) + jnp.sum(jnp.square(v))
+    density = state.density - state.expansion * state.density * (state.T - state.T0)
+    return 1/2 * jnp.sum(jnp.multiply(density, jnp.square(state.u) + jnp.square(state.v)))
         
     
         
